@@ -10,8 +10,24 @@ class DiscountController extends Controller
 {
     public function index()
     {
-        $discounts = Discount::orderBy('created_at', 'desc')->get();
-        return response()->json($discounts);
+        return response()->json(Discount::all());
+    }
+
+    public function store(Request $request)
+    {
+        $request->validate([
+            'code'         => 'required|string|unique:discounts',
+            'type'         => 'required|in:percent,fixed,shipping',
+            'value'        => 'required|numeric|min:0',
+            'min_purchase' => 'sometimes|numeric|min:0',
+            'max_uses'     => 'sometimes|integer|min:1',
+            'starts_at'    => 'sometimes|date',
+            'ends_at'      => 'sometimes|date',
+            'applies_to'   => 'sometimes|string',
+        ]);
+
+        $discount = Discount::create($request->all());
+        return response()->json($discount, 201);
     }
 
     public function show(Discount $discount)
@@ -19,39 +35,9 @@ class DiscountController extends Controller
         return response()->json($discount);
     }
 
-    public function store(Request $request)
-    {
-        $request->validate([
-            'code'         => 'required|string|unique:discounts|uppercase',
-            'type'         => 'required|in:percent,fixed,shipping',
-            'value'        => 'required|numeric|min:0',
-            'min_purchase' => 'sometimes|numeric|min:0',
-            'max_uses'     => 'sometimes|integer|min:1',
-            'starts_at'    => 'sometimes|date',
-            'ends_at'      => 'sometimes|date|after:starts_at',
-            'applies_to'   => 'sometimes|in:all,category,product',
-        ]);
-
-        $discount = Discount::create($request->all());
-
-        return response()->json($discount, 201);
-    }
-
     public function update(Request $request, Discount $discount)
     {
-        $request->validate([
-            'type'         => 'sometimes|in:percent,fixed,shipping',
-            'value'        => 'sometimes|numeric|min:0',
-            'min_purchase' => 'sometimes|numeric|min:0',
-            'max_uses'     => 'sometimes|integer|min:1',
-            'starts_at'    => 'sometimes|date',
-            'ends_at'      => 'sometimes|date',
-            'is_active'    => 'sometimes|boolean',
-            'applies_to'   => 'sometimes|in:all,category,product',
-        ]);
-
         $discount->update($request->all());
-
         return response()->json($discount);
     }
 
@@ -64,8 +50,8 @@ class DiscountController extends Controller
     public function validate(Request $request)
     {
         $request->validate([
-            'code'    => 'required|string',
-            'subtotal'=> 'required|numeric',
+            'code'  => 'required|string',
+            'total' => 'required|numeric|min:0',
         ]);
 
         $discount = Discount::where('code', strtoupper($request->code))
@@ -73,33 +59,47 @@ class DiscountController extends Controller
             ->first();
 
         if (!$discount) {
-            return response()->json(['message' => 'Cupón inválido.'], 404);
+            return response()->json([
+                'valid'   => false,
+                'message' => 'Código de descuento inválido.'
+            ], 422);
         }
 
-        if ($discount->ends_at && $discount->ends_at->isPast()) {
-            return response()->json(['message' => 'Cupón expirado.'], 422);
+        if ($discount->ends_at && now()->isAfter($discount->ends_at)) {
+            return response()->json([
+                'valid'   => false,
+                'message' => 'Este código ha expirado.'
+            ], 422);
         }
 
         if ($discount->max_uses && $discount->used_count >= $discount->max_uses) {
-            return response()->json(['message' => 'Cupón agotado.'], 422);
+            return response()->json([
+                'valid'   => false,
+                'message' => 'Este código ya alcanzó el límite de usos.'
+            ], 422);
         }
 
-        if ($request->subtotal < $discount->min_purchase) {
+        if ($discount->min_purchase && $request->total < $discount->min_purchase) {
             return response()->json([
-                'message' => "Compra mínima requerida: $".$discount->min_purchase
+                'valid'   => false,
+                'message' => "Compra mínima de \${$discount->min_purchase} requerida."
             ], 422);
         }
 
         $discountAmount = match($discount->type) {
-            'percent'  => $request->subtotal * ($discount->value / 100),
-            'fixed'    => $discount->value,
+            'percent'  => round($request->total * ($discount->value / 100), 2),
+            'fixed'    => min($discount->value, $request->total),
             'shipping' => 0,
             default    => 0,
         };
 
         return response()->json([
-            'discount'        => $discount,
+            'valid'           => true,
+            'message'         => '¡Código aplicado exitosamente!',
             'discount_amount' => $discountAmount,
+            'discount_type'   => $discount->type,
+            'discount_value'  => $discount->value,
+            'code'            => $discount->code,
         ]);
     }
 }
